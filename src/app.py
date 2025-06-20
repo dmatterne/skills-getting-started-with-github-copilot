@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+from pymongo import MongoClient
+from fastapi import Depends
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +20,15 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# MongoDB setup
+MONGO_URI = "mongodb://localhost:27017"
+DB_NAME = "mergington_activities"
+COLLECTION_NAME = "activities"
+
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+activities_collection = db[COLLECTION_NAME]
 
 # In-memory activity database
 activities = {
@@ -80,6 +91,16 @@ activities = {
     }
 }
 
+# Pre-populate the database if empty
+if activities_collection.count_documents({}) == 0:
+    for name, details in activities.items():
+        doc = {"_id": name, **details}
+        activities_collection.insert_one(doc)
+
+# Helper to get activity by name
+def get_activity_by_name(activity_name: str):
+    return activities_collection.find_one({"_id": activity_name})
+
 
 @app.get("/")
 def root():
@@ -88,22 +109,26 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    # Return all activities as a dict keyed by name
+    result = {}
+    for doc in activities_collection.find():
+        doc_copy = dict(doc)
+        name = doc_copy.pop("_id")
+        result[name] = doc_copy
+    return result
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
+    activity = get_activity_by_name(activity_name)
+    if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
-
-    # Get the specific activity
-    activity = activities[activity_name]
-
-    # Add student
-    # Validate student is not already signed up
     if email in activity["participants"]:
         raise HTTPException(status_code=400, detail="Student already signed up")
-    activity["participants"].append(email)
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(status_code=400, detail="Activity is full")
+    activities_collection.update_one(
+        {"_id": activity_name},
+        {"$push": {"participants": email}}
+    )
     return {"message": f"Signed up {email} for {activity_name}"}
